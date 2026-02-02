@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ensureAnonymousAuth } from "@/lib/auth";
-import { fetchDrawHistory, fetchSessionByCode, fetchMyCard, rpcCreateMyCard, rpcDrawRandomNumber, rpcJoinSession, rpcEndSession, rpcStartNextSession, fetchParticipants, rpcUpdateWinningRules, fetchWinningRules, type WinningRules, fetchParticipantCards, type CardColor } from "@/lib/rpc";
-import { subscribeToDraws, subscribeToCards, subscribeToSessionState } from "@/lib/realtime";
+import { fetchDrawHistory, fetchSessionByCode, fetchMyCard, rpcCreateMyCard, rpcDrawRandomNumber, rpcJoinSession, rpcEndSession, rpcStartNextSession, fetchParticipants, rpcUpdateWinningRules, fetchWinningRules, type WinningRules, fetchParticipantCards, type CardColor, fetchSessionWinners, rpcClaimWin } from "@/lib/rpc";
+import { subscribeToDraws, subscribeToCards, subscribeToSessionState, subscribeToWinners } from "@/lib/realtime";
+import { subscribeToSessionTransition } from "@/lib/transitions";
 import { supabase } from "@/lib/supabaseClient";
 import type { Database } from "@/lib/supabase";
 import { numberToLabel, COL_LABELS } from "@/lib/bingoCard";
@@ -15,6 +16,9 @@ import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { getPatternName, checkWinningPattern } from "@/lib/winnerCheck";
+import { WinningCardDisplay } from "@/components/WinningCardDisplay";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 function qrUrl(url: string) {
   // External QR image generator (no UI libs). This is just an <img>.
@@ -28,6 +32,25 @@ export default function GmPage() {
   const router = useRouter();
   const params = useParams<{ code: string }>();
   const code = (params.code ?? "").toUpperCase();
+
+  // Check for prev session param and end it
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const prevCode = urlParams.get('prev');
+    if (prevCode) {
+      // End the previous session after a short delay
+      setTimeout(async () => {
+        try {
+          await rpcEndSession(prevCode);
+          console.log('[GMPage] Ended previous session:', prevCode);
+          // Clean up URL
+          window.history.replaceState({}, '', `/gm/${code}`);
+        } catch (e) {
+          console.error('[GMPage] Failed to end previous session:', e);
+        }
+      }, 500);
+    }
+  }, [code]);
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [title, setTitle] = useState<string>("");
@@ -47,6 +70,9 @@ export default function GmPage() {
     Map<string, { grid: number[][]; color: CardColor }>
   >(new Map());
   const [gmCardColor, setGmCardColor] = useState<CardColor>("blue");
+  const [winners, setWinners] = useState<{user_id: string; nickname: string; pattern_type: string}[]>([]);
+  const [myWinPattern, setMyWinPattern] = useState<string | null>(null);
+  const [showWinDialog, setShowWinDialog] = useState(false);
   const [winningRules, setWinningRules] = useState<WinningRules>({
     singleLine: true,
     twoLines: false,
@@ -68,7 +94,10 @@ export default function GmPage() {
     let unsub: null | (() => void) = null;
     let unsubCards: null | (() => void) = null;
     let unsubState: null | (() => void) = null;
+    let unsubWinners: null | (() => void) = null;
+    let unsubTransition: null | (() => void) = null;
     let channelPlayers: ReturnType<typeof supabase.channel> | null = null;
+    const hasTransitionRef = { current: false };
 
     (async () => {
       setErr(null);
@@ -119,14 +148,33 @@ export default function GmPage() {
           setWinningRules(rules);
         }
 
-        unsub = subscribeToDraws(s.id, (row) => {
+        // Fetch existing winners
+        const existingWinners = await fetchSessionWinners(s.id);
+        setWinners(existingWinners);
+
+        unsub = subscribeToDraws(s.id, async (row) => {
           console.log('[GMPage] Draw received:', row.number);
           setHistory((prev) => [{ number: row.number, drawn_at: row.drawn_at }, ...prev]);
+          
+          // Update drawnSet using function updater to avoid stale closure
           setDrawnSet((prev) => {
-            const newSet = new Set(prev).add(row.number);
-            console.log('[GMPage] Updated drawnSet size:', newSet.size);
-            return newSet;
+            const newDrawnSet = new Set(prev).add(row.number);
+            console.log('[GMPage] Updated drawnSet size:', newDrawnSet.size);
+            
+            // Check if GM won
+            if (rules && my.grid) {
+              const winPattern = checkWinningPattern(my.grid, newDrawnSet, rules);
+              if (winPattern) {
+                console.log('[GMPage] GM Win detected! Pattern:', winPattern);
+                rpcClaimWin(code, winPattern).catch((e) => {
+                  console.log('[GMPage] Win already claimed or error:', e);
+                });
+              }
+            }
+            
+            return newDrawnSet;
           });
+          
           setState("live");
         });
 
@@ -139,14 +187,45 @@ export default function GmPage() {
           });
         });
 
+        // Subscribe to winners
+        unsubWinners = subscribeToWinners(s.id, async (winner) => {
+          console.log('[GMPage] Winner announcement received:', winner);
+          const allWinners = await fetchSessionWinners(s.id);
+          setWinners(allWinners);
+          
+          // Check if GM won
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user && winner.user_id === user.id) {
+            setMyWinPattern(winner.pattern_type);
+            setShowWinDialog(true);
+          }
+        });
+
+        // Subscribe to session transitions (for "Start Next Round")
+        unsubTransition = subscribeToSessionTransition(s.id, async ({ new_session_id }) => {
+          hasTransitionRef.current = true;
+          // Get the new session code
+          const { data, error } = await supabase
+            .from("bingo_sessions")
+            .select("code")
+            .eq("id", new_session_id)
+            .single();
+
+          if (!error && data?.code) {
+            window.location.href = `/gm/${data.code}`;
+          }
+        });
+
         // Subscribe to session state changes
         unsubState = subscribeToSessionState(s.id, (state) => {
           setState(state);
           if (state === "ended") {
-            // Redirect to home page when session ends
+            // Only redirect to home if this isn't a transition to a new session
             setTimeout(() => {
-              router.push("/");
-            }, 2000); // Give GM a moment to see the state change
+              if (!hasTransitionRef.current) {
+                router.push("/");
+              }
+            }, 1000);
           }
         });
 
@@ -197,6 +276,8 @@ export default function GmPage() {
       if (unsub) unsub();
       if (unsubCards) unsubCards();
       if (unsubState) unsubState();
+      if (unsubWinners) unsubWinners();
+      if (unsubTransition) unsubTransition();
       if (channelPlayers) supabase.removeChannel(channelPlayers);
     };
   }, [code, router]);
@@ -261,8 +342,8 @@ export default function GmPage() {
     try {
       await ensureAnonymousAuth();
       const result = await rpcStartNextSession(code, nextRoundTitle.trim());
-      // Redirect GM to the new session
-      router.push(`/gm/${result.new_code}`);
+      // Redirect GM to the new session with prev param
+      window.location.href = `/gm/${result.new_code}?prev=${code}`;
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -548,6 +629,7 @@ export default function GmPage() {
             </div>
           </div>
           <div className="flex gap-2">
+            <ThemeToggle />
             {/* Mobile drawer trigger */}
             <Sheet open={mobileDrawerOpen} onOpenChange={setMobileDrawerOpen}>
               <SheetTrigger asChild>
@@ -666,6 +748,31 @@ export default function GmPage() {
                   )}
                 </div>
 
+                {/* Winners Section */}
+                {winners.length > 0 && (
+                  <Card className="border-2 border-yellow-500 bg-gradient-to-br from-yellow-50 to-orange-50">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-lg flex items-center gap-2">
+                        🏆 Winners
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {winners.map((w, i) => (
+                        <div key={i} className="flex justify-between items-center p-2 bg-white rounded-lg shadow-sm">
+                          <span className="font-semibold text-primary">{w.nickname}</span>
+                          <Badge variant="outline" className="bg-yellow-100">
+                            {getPatternName(w.pattern_type)}
+                          </Badge>
+                        </div>
+                      ))}
+                      <Separator className="my-3" />
+                      <p className="text-xs text-center text-muted-foreground">
+                        Choose to start next round or end the session.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+
                 <div className="text-center p-8 bg-gradient-to-br from-primary/5 to-primary/10 rounded-xl border-2 border-primary/20">
                   <div className="text-sm font-medium text-muted-foreground mb-2">Last Drawn</div>
                   <div className="text-7xl font-black tracking-tight bg-gradient-to-br from-primary to-primary/60 bg-clip-text text-transparent">
@@ -713,7 +820,7 @@ export default function GmPage() {
                 <CardDescription>Scan QR or share link</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex justify-center p-4 bg-white rounded-lg">
+                <div className="flex justify-center p-4 bg-white dark:bg-white rounded-lg dark:invert">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={qrUrl(joinLink)} alt="Join QR" width={220} height={220} />
                 </div>
@@ -788,6 +895,52 @@ export default function GmPage() {
               <p className="text-destructive">{err}</p>
             </CardContent>
           </Card>
+        )}
+
+        {/* GM Winner Dialog */}
+        {showWinDialog && myWinPattern && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+            <Card className="max-w-md mx-4 border-4 border-yellow-500 shadow-2xl overflow-hidden p-0">
+              <CardHeader className="bg-gradient-to-r from-yellow-400 to-orange-400 text-white pt-8 pb-8 px-6 space-y-0">
+                <CardTitle className="text-3xl text-center font-bold m-0">🎉 YOU WON! 🎉</CardTitle>
+              </CardHeader>
+              <CardContent className="pt-6 space-y-4">
+                {grid && (
+                  <WinningCardDisplay 
+                    grid={grid} 
+                    drawnSet={drawnSet} 
+                    patternType={myWinPattern}
+                    color={gmCardColor}
+                  />
+                )}
+                <p className="text-xl text-center">
+                  You won with: <strong className="text-primary">{getPatternName(myWinPattern)}</strong>
+                </p>
+                <p className="text-sm text-muted-foreground text-center">
+                  As the GM, you can now choose to start the next round or end the session.
+                </p>
+                {winners.length > 1 && (
+                  <div className="pt-4 border-t">
+                    <h4 className="font-semibold mb-2 text-center">Other Winners:</h4>
+                    <div className="space-y-1">
+                      {winners.filter(w => w.pattern_type !== myWinPattern).map((w, i) => (
+                        <div key={i} className="text-sm text-center">
+                          {w.nickname} - {getPatternName(w.pattern_type)}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <Button 
+                  onClick={() => setShowWinDialog(false)} 
+                  className="w-full"
+                  variant="outline"
+                >
+                  Close
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
         )}
       </div>
     </div>

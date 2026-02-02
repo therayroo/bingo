@@ -3,12 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ensureAnonymousAuth } from "@/lib/auth";
-import { fetchMyCard, fetchSessionByCode, fetchDrawHistory, rpcCreateMyCard, fetchWinningRules, type WinningRules, type CardColor } from "@/lib/rpc";
-import { subscribeToDraws, subscribeToSessionState } from "@/lib/realtime";
+import { fetchMyCard, fetchSessionByCode, fetchDrawHistory, rpcCreateMyCard, fetchWinningRules, type WinningRules, type CardColor, rpcClaimWin, fetchSessionWinners } from "@/lib/rpc";
+import { subscribeToDraws, subscribeToSessionState, subscribeToWinners } from "@/lib/realtime";
 import { subscribeToSessionTransition } from "@/lib/transitions";
 import { supabase } from "@/lib/supabaseClient";
 import { COL_LABELS, numberToLabel } from "@/lib/bingoCard";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { checkWinningPattern, getPatternName } from "@/lib/winnerCheck";
+import { WinningCardDisplay } from "@/components/WinningCardDisplay";
+import { WinningPatternThumbnail } from "@/components/WinningPatternThumbnail";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 type Cell = { value: number; isFree: boolean; isDrawn: boolean; isMarked: boolean };
 
@@ -26,11 +31,15 @@ export default function PlayPage() {
   const [isExiting, setIsExiting] = useState(false);
   const [winningRules, setWinningRules] = useState<WinningRules | null>(null);
   const [cardColor, setCardColor] = useState<CardColor>("blue");
+  const [winners, setWinners] = useState<{user_id: string; nickname: string; pattern_type: string}[]>([]);
+  const [showWinDialog, setShowWinDialog] = useState(false);
+  const [myWinPattern, setMyWinPattern] = useState<string | null>(null);
 
   useEffect(() => {
     let unsub: null | (() => void) = null;
     let unsubTransition: null | (() => void) = null;
     let unsubState: null | (() => void) = null;
+    let unsubWinners: null | (() => void) = null;
     const timers = { exit: null as NodeJS.Timeout | null, hide: null as NodeJS.Timeout | null };
 
     (async () => {
@@ -56,11 +65,28 @@ export default function PlayPage() {
         setWinningRules(rules);
 
         console.log('[PlayPage] About to subscribe to draws for session:', s.id);
-        unsub = subscribeToDraws(s.id, (row) => {
+        unsub = subscribeToDraws(s.id, async (row) => {
           console.log('[PlayPage] ====> CALLBACK FIRED! New draw received:', row.number);
           console.log('[PlayPage] ====> Current showPopup state:', showPopup);
           console.log('[PlayPage] ====> Current latestDraw state:', latestDraw);
-          setDrawnSet((prev) => new Set(prev).add(row.number));
+          
+          // Update drawn set using function updater to avoid stale closure
+          setDrawnSet((prev) => {
+            const newDrawnSet = new Set(prev).add(row.number);
+            
+            // Check for win after adding this number
+            if (rules && my.grid) {
+              const winPattern = checkWinningPattern(my.grid, newDrawnSet, rules);
+              if (winPattern) {
+                console.log('[PlayPage] Win detected! Pattern:', winPattern);
+                rpcClaimWin(code, winPattern).catch((e) => {
+                  console.log('[PlayPage] Win already claimed or error:', e);
+                });
+              }
+            }
+            
+            return newDrawnSet;
+          });
           
           // Clear any existing popup timers
           if (timers.exit) clearTimeout(timers.exit);
@@ -84,6 +110,20 @@ export default function PlayPage() {
           }, 3000);
         });
         console.log('[PlayPage] ====> Subscription setup complete for session:', s.id);
+
+        // Subscribe to winners
+        unsubWinners = subscribeToWinners(s.id, async (winner) => {
+          console.log('[PlayPage] Winner announced:', winner);
+          const allWinners = await fetchSessionWinners(s.id);
+          setWinners(allWinners);
+          
+          // Check if I won
+          const { data: { user } } = await supabase.auth.getUser();
+          if (user && winner.user_id === user.id) {
+            setMyWinPattern(winner.pattern_type);
+            setShowWinDialog(true);
+          }
+        });
 
         unsubTransition = subscribeToSessionTransition(s.id, async ({ new_session_id }) => {
           // Get the new session code (member row already copied by RPC)
@@ -115,11 +155,13 @@ export default function PlayPage() {
       if (unsub) unsub();
       if (unsubTransition) unsubTransition();
       if (unsubState) unsubState();
+      if (unsubWinners) unsubWinners();
       
       // Clear popup timers on cleanup
       if (timers.exit) clearTimeout(timers.exit);
       if (timers.hide) clearTimeout(timers.hide);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code, router]);
 
   const activePatterns = useMemo(() => {
@@ -254,18 +296,21 @@ export default function PlayPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 via-zinc-50 to-slate-100">
+    <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 via-zinc-50 to-slate-100 dark:from-slate-950 dark:via-zinc-950 dark:to-slate-900">
       <header className="p-4 md:p-6 border-b bg-card/50 backdrop-blur-sm sticky top-0 z-10 shadow-sm">
         <div className="max-w-4xl mx-auto flex justify-between items-center">
           <div>
             <div className="text-xs md:text-sm text-muted-foreground font-medium">Session</div>
             <Badge variant="outline" className="text-lg md:text-xl font-bold mt-1">{code}</Badge>
           </div>
-          <div className="text-right">
-            <div className="text-xs md:text-sm text-muted-foreground font-medium">Drawn</div>
-            <div className="text-lg md:text-xl font-bold mt-1">
-              {drawnSet.size}<span className="text-muted-foreground">/75</span>
+          <div className="text-right flex items-center gap-3">
+            <div>
+              <div className="text-xs md:text-sm text-muted-foreground font-medium">Drawn</div>
+              <div className="text-lg md:text-xl font-bold mt-1">
+                {drawnSet.size}<span className="text-muted-foreground">/75</span>
+              </div>
             </div>
+            <ThemeToggle />
           </div>
         </div>
       </header>
@@ -357,6 +402,66 @@ export default function PlayPage() {
           </div>
         </div>
       </div>
+
+      {/* Winner Dialog */}
+      {showWinDialog && myWinPattern && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <Card className="max-w-md mx-4 border-4 border-yellow-500 shadow-2xl overflow-hidden p-0">
+            <CardHeader className="bg-gradient-to-r from-yellow-400 to-orange-400 text-white pt-8 pb-8 px-6 space-y-0">
+              <CardTitle className="text-3xl text-center font-bold m-0">🎉 BINGO! 🎉</CardTitle>
+            </CardHeader>
+            <CardContent className="pt-6 space-y-4">
+              {grid && (
+                <WinningCardDisplay 
+                  grid={grid} 
+                  drawnSet={drawnSet} 
+                  patternType={myWinPattern}
+                  color={cardColor}
+                />
+              )}
+              <p className="text-xl text-center">
+                You won with: <strong className="text-primary">{getPatternName(myWinPattern)}</strong>
+              </p>
+              <p className="text-sm text-muted-foreground text-center">
+                Waiting for GM to end session or start next round...
+              </p>
+              {winners.length > 1 && (
+                <div className="pt-4 border-t">
+                  <h4 className="font-semibold mb-2 text-center">Other Winners:</h4>
+                  <div className="space-y-1">
+                    {winners.filter(w => w.user_id !== myWinPattern).map((w, i) => (
+                      <div key={i} className="text-sm text-center">
+                        {w.nickname} - {getPatternName(w.pattern_type)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Winners List (for non-winners to see) */}
+      {!showWinDialog && winners.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-40">
+          <Card className="border-2 border-yellow-500 bg-yellow-50/95 shadow-lg">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg">🏆 Winners</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {winners.map((w, i) => (
+                <div key={i} className="space-y-2">
+                  <div className="text-sm font-semibold text-center">
+                    {w.nickname} - {getPatternName(w.pattern_type)}
+                  </div>
+                  <WinningPatternThumbnail patternType={w.pattern_type} size="sm" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {err && (
         <footer className="p-4 md:p-6 border-t bg-destructive/10 backdrop-blur-sm">
