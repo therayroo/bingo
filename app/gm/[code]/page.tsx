@@ -750,23 +750,23 @@ export default function GmPage() {
 
                 {/* Winners Section */}
                 {winners.length > 0 && (
-                  <Card className="border-2 border-yellow-500 bg-gradient-to-br from-yellow-50 to-orange-50">
+                  <Card className="border-4 border-yellow-500 bg-gradient-to-br from-yellow-50 via-yellow-100 to-orange-100 dark:from-yellow-900/30 dark:via-yellow-800/30 dark:to-orange-900/30 shadow-xl">
                     <CardHeader className="pb-3">
-                      <CardTitle className="text-lg flex items-center gap-2">
+                      <CardTitle className="text-2xl flex items-center gap-2 text-yellow-900 dark:text-yellow-100">
                         🏆 Winners
                       </CardTitle>
                     </CardHeader>
-                    <CardContent className="space-y-2">
+                    <CardContent className="space-y-3">
                       {winners.map((w, i) => (
-                        <div key={i} className="flex justify-between items-center p-2 bg-white rounded-lg shadow-sm">
-                          <span className="font-semibold text-primary">{w.nickname}</span>
-                          <Badge variant="outline" className="bg-yellow-100">
+                        <div key={i} className="flex justify-between items-center p-4 bg-white dark:bg-gray-800 rounded-lg shadow-md border-2 border-yellow-400">
+                          <span className="font-bold text-xl text-gray-900 dark:text-gray-100">{w.nickname}</span>
+                          <Badge variant="secondary" className="bg-yellow-400 text-yellow-900 border-2 border-yellow-600 text-sm font-bold px-3 py-1">
                             {getPatternName(w.pattern_type)}
                           </Badge>
                         </div>
                       ))}
                       <Separator className="my-3" />
-                      <p className="text-xs text-center text-muted-foreground">
+                      <p className="text-sm text-center text-gray-700 dark:text-gray-300 font-medium">
                         Choose to start next round or end the session.
                       </p>
                     </CardContent>
