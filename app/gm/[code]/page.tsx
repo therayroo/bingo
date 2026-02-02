@@ -15,10 +15,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
-function qrUrl(path: string) {
+function qrUrl(url: string) {
   // External QR image generator (no UI libs). This is just an <img>.
-  const full = typeof window !== "undefined" ? `${window.location.origin}${path}` : path;
-  const encoded = encodeURIComponent(full);
+  const encoded = encodeURIComponent(url);
   return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encoded}`;
 }
 
@@ -58,7 +57,11 @@ export default function GmPage() {
     customNumbers: "",
   });
 
-  const joinLink = useMemo(() => `/join/${code}`, [code]);
+  const joinLink = useMemo(() => {
+    // Use full URL for QR codes
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    return origin ? `${origin}/join/${code}` : `/join/${code}`;
+  }, [code]);
 
   useEffect(() => {
     let unsub: null | (() => void) = null;
@@ -339,7 +342,7 @@ export default function GmPage() {
                   const cardData = participantCards.get(p.user_id);
                   return (
                     <div
-                      key={p.user_id}
+                      key={`${p.user_id}-${drawnSet.size}`}
                       className="p-3 hover:bg-accent/50 transition-colors"
                     >
                       <div className="flex items-center justify-between gap-3">

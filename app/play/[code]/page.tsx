@@ -31,6 +31,8 @@ export default function PlayPage() {
     let unsub: null | (() => void) = null;
     let unsubTransition: null | (() => void) = null;
     let unsubState: null | (() => void) = null;
+    let exitTimer: NodeJS.Timeout | null = null;
+    let hideTimer: NodeJS.Timeout | null = null;
 
     (async () => {
       setErr(null);
@@ -55,14 +57,19 @@ export default function PlayPage() {
 
         unsub = subscribeToDraws(s.id, (row) => {
           setDrawnSet((prev) => new Set(prev).add(row.number));
+          
+          // Clear any existing popup timers
+          if (exitTimer) clearTimeout(exitTimer);
+          if (hideTimer) clearTimeout(hideTimer);
+          
           // Show popup for new draw
           setLatestDraw(row.number);
           setIsExiting(false);
           setShowPopup(true);
           
           // Start exit animation before hiding
-          setTimeout(() => setIsExiting(true), 2400);
-          setTimeout(() => setShowPopup(false), 3000);
+          exitTimer = setTimeout(() => setIsExiting(true), 2400);
+          hideTimer = setTimeout(() => setShowPopup(false), 3000);
         });
 
         unsubTransition = subscribeToSessionTransition(s.id, async ({ new_session_id }) => {
@@ -94,6 +101,10 @@ export default function PlayPage() {
       if (unsub) unsub();
       if (unsubTransition) unsubTransition();
       if (unsubState) unsubState();
+      
+      // Clear popup timers on cleanup
+      if (exitTimer) clearTimeout(exitTimer);
+      if (hideTimer) clearTimeout(hideTimer);
     };
   }, [code, router]);
 
