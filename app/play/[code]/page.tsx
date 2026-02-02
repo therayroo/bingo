@@ -31,8 +31,7 @@ export default function PlayPage() {
     let unsub: null | (() => void) = null;
     let unsubTransition: null | (() => void) = null;
     let unsubState: null | (() => void) = null;
-    let exitTimer: NodeJS.Timeout | null = null;
-    let hideTimer: NodeJS.Timeout | null = null;
+    const timers = { exit: null as NodeJS.Timeout | null, hide: null as NodeJS.Timeout | null };
 
     (async () => {
       setErr(null);
@@ -43,6 +42,7 @@ export default function PlayPage() {
         await rpcCreateMyCard(code);
 
         const s = await fetchSessionByCode(code);
+        console.log('[PlayPage] Session loaded:', s.id);
 
         const my = await fetchMyCard(s.id);
         setGrid(my.grid);
@@ -55,22 +55,35 @@ export default function PlayPage() {
         const rules = await fetchWinningRules(s.id);
         setWinningRules(rules);
 
+        console.log('[PlayPage] About to subscribe to draws for session:', s.id);
         unsub = subscribeToDraws(s.id, (row) => {
+          console.log('[PlayPage] ====> CALLBACK FIRED! New draw received:', row.number);
+          console.log('[PlayPage] ====> Current showPopup state:', showPopup);
+          console.log('[PlayPage] ====> Current latestDraw state:', latestDraw);
           setDrawnSet((prev) => new Set(prev).add(row.number));
           
           // Clear any existing popup timers
-          if (exitTimer) clearTimeout(exitTimer);
-          if (hideTimer) clearTimeout(hideTimer);
+          if (timers.exit) clearTimeout(timers.exit);
+          if (timers.hide) clearTimeout(timers.hide);
           
           // Show popup for new draw
+          console.log('[PlayPage] ====> Setting states for popup...');
           setLatestDraw(row.number);
           setIsExiting(false);
           setShowPopup(true);
+          console.log('[PlayPage] ====> States set. latestDraw:', row.number, 'showPopup: true');
           
           // Start exit animation before hiding
-          exitTimer = setTimeout(() => setIsExiting(true), 2400);
-          hideTimer = setTimeout(() => setShowPopup(false), 3000);
+          timers.exit = setTimeout(() => {
+            console.log('[PlayPage] Starting popup exit animation');
+            setIsExiting(true);
+          }, 2400);
+          timers.hide = setTimeout(() => {
+            console.log('[PlayPage] Hiding popup');
+            setShowPopup(false);
+          }, 3000);
         });
+        console.log('[PlayPage] ====> Subscription setup complete for session:', s.id);
 
         unsubTransition = subscribeToSessionTransition(s.id, async ({ new_session_id }) => {
           // Get the new session code (member row already copied by RPC)
@@ -98,13 +111,14 @@ export default function PlayPage() {
     })();
 
     return () => {
+      console.log('[PlayPage] Cleaning up subscriptions');
       if (unsub) unsub();
       if (unsubTransition) unsubTransition();
       if (unsubState) unsubState();
       
       // Clear popup timers on cleanup
-      if (exitTimer) clearTimeout(exitTimer);
-      if (hideTimer) clearTimeout(hideTimer);
+      if (timers.exit) clearTimeout(timers.exit);
+      if (timers.hide) clearTimeout(timers.hide);
     };
   }, [code, router]);
 
