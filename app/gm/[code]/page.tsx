@@ -6,6 +6,7 @@ import { ensureAnonymousAuth } from "@/lib/auth";
 import { fetchDrawHistory, fetchSessionByCode, fetchMyCard, rpcCreateMyCard, rpcDrawRandomNumber, rpcJoinSession, rpcEndSession, rpcStartNextSession, fetchParticipants, rpcUpdateWinningRules, fetchWinningRules, type WinningRules, fetchParticipantCards, type CardColor } from "@/lib/rpc";
 import { subscribeToDraws, subscribeToCards, subscribeToSessionState } from "@/lib/realtime";
 import { supabase } from "@/lib/supabaseClient";
+import type { Database } from "@/lib/supabase";
 import { numberToLabel, COL_LABELS } from "@/lib/bingoCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,7 +41,7 @@ export default function GmPage() {
   const [nextRoundTitle, setNextRoundTitle] = useState("");
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [participants, setParticipants] = useState<
-    { user_id: string; nickname: string; role: "gm" | "player"; created_at: string }[]
+    Pick<Database['public']['Tables']['bingo_players']['Row'], 'user_id' | 'nickname' | 'role' | 'created_at'>[]
   >([]);
   const [participantCards, setParticipantCards] = useState<
     Map<string, { grid: number[][]; color: CardColor }>
@@ -119,8 +120,13 @@ export default function GmPage() {
         }
 
         unsub = subscribeToDraws(s.id, (row) => {
+          console.log('[GMPage] Draw received:', row.number);
           setHistory((prev) => [{ number: row.number, drawn_at: row.drawn_at }, ...prev]);
-          setDrawnSet((prev) => new Set(prev).add(row.number));
+          setDrawnSet((prev) => {
+            const newSet = new Set(prev).add(row.number);
+            console.log('[GMPage] Updated drawnSet size:', newSet.size);
+            return newSet;
+          });
           setState("live");
         });
 
@@ -145,8 +151,10 @@ export default function GmPage() {
         });
 
         // Subscribe to participant changes
+        console.log('[GMPage] Setting up participant subscription for session:', s.id);
+        const playerChannelName = `players_${s.id}_${Math.random().toString(36).substring(7)}`;
         channelPlayers = supabase
-          .channel(`bingo_players:${s.id}`)
+          .channel(playerChannelName)
           .on(
             "postgres_changes",
             {
@@ -155,8 +163,10 @@ export default function GmPage() {
               table: "bingo_players",
               filter: `session_id=eq.${s.id}`,
             },
-            async () => {
+            async (payload) => {
+              console.log('[GMPage] Participant INSERT event:', payload);
               const ppl = await fetchParticipants(s.id);
+              console.log('[GMPage] Updated participants:', ppl.length);
               setParticipants(ppl);
             }
           )
@@ -168,12 +178,16 @@ export default function GmPage() {
               table: "bingo_players",
               filter: `session_id=eq.${s.id}`,
             },
-            async () => {
+            async (payload) => {
+              console.log('[GMPage] Participant UPDATE event:', payload);
               const ppl = await fetchParticipants(s.id);
+              console.log('[GMPage] Updated participants:', ppl.length);
               setParticipants(ppl);
             }
           )
-          .subscribe();
+          .subscribe((status, err) => {
+            console.log('[GMPage] Participant subscription status:', status, 'error:', err);
+          });
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       }
@@ -290,12 +304,23 @@ export default function GmPage() {
   // Card Thumbnail Component
   const CardThumbnail = ({ userId, size = "small" }: { userId: string; size?: "small" | "large" }) => {
     const cardData = participantCards.get(userId);
-    if (!cardData) return null;
+    if (!cardData) {
+      console.log('[CardThumbnail] No card data for user:', userId);
+      return null;
+    }
 
     const { grid, color } = cardData;
     const colorClasses = getCardColorClasses(color);
     const cellSize = size === "small" ? "w-2 h-2" : "w-4 h-4";
     const gapSize = size === "small" ? "gap-0.5" : "gap-1";
+    
+    const drawnCount = grid.flat().filter((v, idx) => {
+      const r = Math.floor(idx / 5);
+      const c = idx % 5;
+      const isFree = v === 0 && r === 2 && c === 2;
+      return isFree || drawnSet.has(v);
+    }).length;
+    console.log('[CardThumbnail] Rendering for user:', userId, 'drawn:', drawnCount, 'drawnSet size:', drawnSet.size);
 
     return (
       <div className={`grid grid-cols-5 ${gapSize}`}>
