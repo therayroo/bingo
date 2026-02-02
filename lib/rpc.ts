@@ -159,3 +159,24 @@ export async function fetchWinningRules(sessionId: string): Promise<WinningRules
   if (error) throw error;
   return (data?.winning_rules as WinningRules) || null;
 }
+
+export async function rpcClaimWin(code: string, patternType: string): Promise<{ winner_id: string; is_first_winner: boolean; total_winners: number }> {
+  // @ts-expect-error - RPC function not in auto-generated types yet
+  const { data, error } = await supabase.rpc("claim_bingo_win", {
+    p_code: code,
+    p_pattern_type: patternType,
+  });
+  if (error) throw error;
+  return data as unknown as { winner_id: string; is_first_winner: boolean; total_winners: number };
+}
+
+export async function fetchSessionWinners(sessionId: string): Promise<
+  { user_id: string; nickname: string; pattern_type: string; claimed_at: string }[]
+> {
+  // @ts-expect-error - RPC function not in auto-generated types yet
+  const { data, error } = await supabase.rpc("get_session_winners", {
+    p_session_id: sessionId,
+  });
+  if (error) throw error;
+  return (data as unknown as { user_id: string; nickname: string; pattern_type: string; claimed_at: string }[]) || [];
+}

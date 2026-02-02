@@ -47,12 +47,33 @@ USING (true);
 -- BINGO_PLAYERS POLICIES
 -- ============================================================================
 
+-- Allow authenticated users to SELECT all players (needed for realtime participant updates)
+CREATE POLICY "bingo_players_select_all"
+ON bingo_players
+FOR SELECT
+TO authenticated, anon
+USING (true);
+
 -- Allow members to see other members in their session
 -- (existing policy: bingo_players_select_session_members)
 -- This one can stay as-is since it uses is_bingo_member()
 
 -- Keep INSERT restricted to self
 -- (existing policy: bingo_players_insert_self)
+
+-- ============================================================================
+-- BINGO_SESSIONS POLICIES
+-- ============================================================================
+
+-- Allow authenticated users to SELECT all sessions (needed for realtime state updates)
+CREATE POLICY "bingo_sessions_select_all"
+ON bingo_sessions
+FOR SELECT
+TO authenticated, anon
+USING (true);
+
+-- Keep INSERT/UPDATE restricted to GM
+-- (existing policies handle this)
 
 -- ============================================================================
 -- VERIFICATION

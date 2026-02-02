@@ -99,3 +99,32 @@ export function subscribeToSessionState(
     supabase.removeChannel(channel);
   };
 }
+
+export function subscribeToWinners(
+  sessionId: string,
+  onWinner: (winner: { user_id: string; pattern_type: string; claimed_at: string }) => void
+) {
+  const channelName = `winners_${sessionId}_${Math.random().toString(36).substring(7)}`;
+  const channel = supabase
+    .channel(channelName)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "bingo_winners",
+        filter: `session_id=eq.${sessionId}`,
+      },
+      (payload) => {
+        const row = payload.new as { user_id: string; pattern_type: string; claimed_at: string };
+        onWinner({ user_id: row.user_id, pattern_type: row.pattern_type, claimed_at: row.claimed_at });
+      }
+    )
+    .subscribe((status, err) => {
+      console.log('[subscribeToWinners] Subscription status:', status, 'error:', err);
+    });
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}

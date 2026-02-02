@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 export default function JoinPage() {
   const router = useRouter();
@@ -48,6 +49,9 @@ export default function JoinPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
       <Card className="card-3d w-full max-w-md">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-3">
